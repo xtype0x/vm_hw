@@ -38,7 +38,7 @@ static inline void shack_init(CPUState *env){
 	/*Init hash*/
 	for(i=0; i<SHACK_SIZE; i++) {
 		shadow_hash_list[i].guest_eip = 0;
-		shadow_hash_list[i].host_eip = optimization_ret_addr;
+		shadow_hash_list[i].host_eip = (unsigned long*)optimization_ret_addr;
 	}
 } 
 
@@ -57,7 +57,7 @@ void shack_set_shadow(CPUState *env, target_ulong guest_eip, unsigned long *host
  *  Reset shadow stack.
  */
 void helper_shack_flush(CPUState *env){
-	env->shack_top = env->shack_end + 1;
+	env->shack_top = env->shack + 1;
 }
 
 /*
@@ -68,8 +68,8 @@ void push_shack(CPUState *env, TCGv_ptr cpu_env, target_ulong next_eip) {
 	TCGv_ptr temp_shack_top = tcg_temp_new_ptr();
 	TCGv_ptr temp_shack_end = tcg_temp_new_ptr();
 	TCGv_ptr temp_entry_ptr = tcg_temp_new_ptr();
-	TCGv temp_next_eip = tcg_temp_new();
-	int flush_label = gen_new_label();
+	TCGv temp_next_eip = tcg_temp_local_new_i32();
+	// int flush_label = gen_new_label();
 	shack_hash_entry *entry;
 
 	//Load the entry. Entry is the constant for each next_eip
@@ -79,19 +79,21 @@ void push_shack(CPUState *env, TCGv_ptr cpu_env, target_ulong next_eip) {
 	// load to temp
 	tcg_gen_ld_ptr(temp_shack_top, cpu_env, offsetof(CPUState, shack_top));
 	tcg_gen_ld_ptr(temp_shack_end, cpu_env, offsetof(CPUState, shack_end));
-	tcg_gen_movi_i64(temp_next_eip, next_eip);
-	tcg_gen_movi_i64(temp_entry_ptr ,entry);
+	tcg_gen_movi_i32(temp_next_eip, next_eip);
+	tcg_gen_movi_i32(temp_entry_ptr ,entry);
 
 	//- branch to flush
-	// tcg_gen_brcond_ptr(TCG_COND_NE, temp_shack_top, temp_shack_end, flush_label);
+	// tcg_gen_brcond_ptr(TCG_COND_EQ, temp_shack_top, temp_shack_end, flush_label);
 
 	// push to stack
 	tcg_gen_st_ptr(temp_entry_ptr, temp_shack_top, 0);
-	tcg_gen_addi_ptr(temp_shack_top, temp_shack_top, 8);
+	tcg_gen_addi_ptr(temp_shack_top, temp_shack_top, sizeof(uint64_t));
 	tcg_gen_st_ptr(temp_shack_top, cpu_env, offsetof(CPUState, shack_top));
 
 	// gen_set_label(flush_label);
+	// printf("");//do nothing
 	// // flush stack
+	// helper_shack_flush(env);
 	// tcg_gen_mov_tl(temp_shack_top, tcg_const_tl((int32_t)(env->shack + 1)));
 }
 
@@ -103,60 +105,52 @@ void push_shack(CPUState *env, TCGv_ptr cpu_env, target_ulong next_eip) {
 void pop_shack(TCGv_ptr cpu_env, TCGv next_eip){
 	//----------------------TCG operations 
 	TCGv_ptr temp_shack_top = tcg_temp_new_ptr();
-	TCGv_ptr temp_shack_end = tcg_temp_new_ptr();
+	TCGv_ptr temp_shack_empty = tcg_temp_new_ptr();
 	TCGv_ptr temp_shack_top_next = tcg_temp_new_ptr();
 	TCGv_ptr temp_entry_ptr = tcg_temp_new_ptr();
 	TCGv_ptr temp_host_eip = tcg_temp_new_ptr();
-	TCGv temp_guest_eip = tcg_temp_new();
-	TCGv temp_line = tcg_temp_new();
+	TCGv temp_guest_eip = tcg_temp_local_new_i32();
 	TCGv temp_next_eip = tcg_temp_local_new_i32();
-	int flush_label = gen_new_label(); // create label
+	int eip_match_label = gen_new_label(); // create label
 	int empty_label = gen_new_label(); // create label
 	
 	//load next_eip into temp_next_eip
 	tcg_gen_mov_i32(temp_next_eip, next_eip);
 	// load shack_top ptr into temp_shack_top	
 	tcg_gen_ld_ptr(temp_shack_top, cpu_env, offsetof(CPUState, shack_top));
-	tcg_gen_ld_ptr(temp_shack_end, cpu_env, offsetof(CPUState, shack_end));
+	tcg_gen_ld_ptr(temp_shack_empty, cpu_env, offsetof(CPUState, shack));
 
 	//check if stack is empty
-	tcg_gen_brcond_ptr(TCG_COND_EQ, temp_shack_top, temp_shack_end, empty_label);
+	tcg_gen_brcond_ptr(TCG_COND_EQ, temp_shack_top, temp_shack_empty, empty_label);
 
-	// get (shack_top - 8)
-	tcg_gen_ld_ptr(temp_shack_top, cpu_env, offsetof(CPUState, shack_top));
-	tcg_gen_subi_tl(temp_shack_top_next, temp_shack_top, 8);
-	// get entry
-	tcg_gen_ld_ptr(temp_entry_ptr, temp_shack_top_next, 0);
-	// load entry.guest_eip
-	tcg_gen_ld_ptr(temp_guest_eip, temp_entry_ptr, offsetof(shack_hash_entry, guest_eip));
+		// get (shack_top - 8)
+		tcg_gen_ld_ptr(temp_shack_top, cpu_env, offsetof(CPUState, shack_top));
+		tcg_gen_subi_tl(temp_shack_top_next, temp_shack_top, sizeof(uint64_t));
+		// get entry
+		tcg_gen_ld_ptr(temp_entry_ptr, temp_shack_top_next, 0);
+		// load entry.guest_eip
+		tcg_gen_ld_ptr(temp_guest_eip, temp_entry_ptr, offsetof(shack_hash_entry, guest_eip));
 
-	// branch to label
-	tcg_gen_brcond_ptr(TCG_COND_NE, temp_next_eip, temp_guest_eip, flush_label);
-	//reload all temps.
-	tcg_gen_ld_ptr(temp_shack_top, cpu_env, offsetof(CPUState, shack_top));
-	tcg_gen_subi_tl(temp_shack_top_next, temp_shack_top, 8);
-	tcg_gen_ld_ptr(temp_entry_ptr, temp_shack_top_next, 0);
-	// load entry.host_eip into temp_host_eip
-	tcg_gen_ld_ptr(temp_host_eip, temp_entry_ptr, offsetof(shack_hash_entry, host_eip));
-	// update shack_top
-	tcg_gen_st_ptr(temp_shack_top_next, cpu_env, offsetof(CPUState, shack_top)); 
+		// branch to label
+		tcg_gen_brcond_ptr(TCG_COND_NE, temp_next_eip, temp_guest_eip, eip_match_label);
+		//reload all temps.
+			tcg_gen_ld_ptr(temp_shack_top, cpu_env, offsetof(CPUState, shack_top));
+			tcg_gen_subi_tl(temp_shack_top_next, temp_shack_top, sizeof(uint64_t));
+			tcg_gen_ld_ptr(temp_entry_ptr, temp_shack_top_next, 0);
+			// load entry.host_eip into temp_host_eip
+			tcg_gen_ld_ptr(temp_host_eip, temp_entry_ptr, offsetof(shack_hash_entry, host_eip));
+			// update shack_top
+			tcg_gen_st_ptr(temp_shack_top_next, cpu_env, offsetof(CPUState, shack_top)); 
+			
+			// jump
+			*gen_opc_ptr++ = INDEX_op_jmp;
+			*gen_opparam_ptr++ = temp_host_eip;
+		
+		// set label here
+		gen_set_label(eip_match_label);
 	
-	// jump
-	*gen_opc_ptr++ = INDEX_op_jmp;
-	*gen_opparam_ptr++ = temp_host_eip;
-	
-	// set label here
-	gen_set_label(flush_label); 
-	// flush shack
-	tcg_gen_ld_ptr(temp_shack_end, cpu_env, offsetof(CPUState, shack_end));
-	tcg_gen_ld_ptr(temp_shack_end, cpu_env, offsetof(CPUState, shack_top));
-	
-	// set empty_label here
-	gen_set_label(empty_label); 
-	tcg_gen_movi_tl(temp_host_eip, optimization_ret_addr);
-	*gen_opc_ptr++ = INDEX_op_jmp;
-	*gen_opparam_ptr++ = temp_host_eip;
-	//----------------------End of TCG operationos
+	// empty stack do nothing
+	gen_set_label(empty_label);
 }
 
 /*
@@ -165,7 +159,6 @@ void pop_shack(TCGv_ptr cpu_env, TCGv next_eip){
 __thread int update_ibtc;
 struct ibtc_table *lookup_table;
 int ibtc_table_index;
-int update_flag;
 target_ulong tmp_pc;
 /*
  * helper_lookup_ibtc()
@@ -174,12 +167,11 @@ target_ulong tmp_pc;
  */
 void *helper_lookup_ibtc(target_ulong guest_eip){
 	//Use guest_eip to look up the table
-	ibtc_table_index=guest_eip & ((1<<16)-1);
+	ibtc_table_index = guest_eip & IBTC_CACHE_MASK;
 	
 	if(lookup_table->htable[ibtc_table_index].guest_eip == guest_eip) {
-		update_flag = 0;
 		return lookup_table->htable[ibtc_table_index].tb->tc_ptr;
-		}
+	}
 		
 	//if no found
 	update_ibtc = 1;
@@ -196,8 +188,6 @@ void update_ibtc_entry(TranslationBlock *tb){
 	update_ibtc = 0;
 	lookup_table->htable[ibtc_table_index].guest_eip = tmp_pc;
 	lookup_table->htable[ibtc_table_index].tb = tb;
-
-	return;
 }
 /*
  * ibtc_init()
